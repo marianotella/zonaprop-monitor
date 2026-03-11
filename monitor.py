@@ -27,10 +27,15 @@ except ImportError:
 
 try:
     from playwright.sync_api import sync_playwright
-    from playwright_stealth import stealth_sync
     PLAYWRIGHT_OK = True
 except ImportError:
     PLAYWRIGHT_OK = False
+
+try:
+    from playwright_stealth import stealth_sync
+    STEALTH_OK = True
+except ImportError:
+    STEALTH_OK = False
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -150,7 +155,10 @@ def fetch_listings(url: str) -> list:
         """)
 
         page = context.new_page()
-        stealth_sync(page)  # parchea fingerprints que detecta Cloudflare
+        if STEALTH_OK:
+            stealth_sync(page)  # parchea fingerprints que detecta Cloudflare
+        else:
+            log.warning("  playwright-stealth no instalado, puede haber detección de bot")
 
         # "load" espera que el DOM esté listo sin importar requests pendientes
         page.goto(url, wait_until="load", timeout=30000)
