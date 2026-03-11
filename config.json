@@ -1,0 +1,20 @@
+{
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "username": "tu_email@gmail.com",
+    "password": "tu_app_password"
+  },
+  "monitors": [
+    {
+      "name": "Tella — Boedo/Almagro/Caballito",
+      "url": "https://www.zonaprop.com.ar/departamentos-alquiler-boedo-almagro-caballito-mas-de-2-banos-1-habitacion-desde-2-hasta-3-ambientes-mas-50-m2-cubiertos-650000-1500000-pesos.html",
+      "notify_email": "tella@gmail.com"
+    },
+    {
+      "name": "Julieta — Caballito/Flores/Boedo",
+      "url": "https://www.zonaprop.com.ar/departamentos-ph-alquiler-caballito-flores-boedo-almagro-floresta-villa-luro-mas-de-2-ambientes-publicado-hace-menos-de-1-dia-menos-800000-pesos.html",
+      "notify_email": "julieta@gmail.com"
+    }
+  ]
+}
