@@ -113,14 +113,19 @@ def _parse_html(html: str, url: str) -> list:
         title_el = card.find(class_=re.compile(r"title|address|location", re.I))
         price_el = card.find(class_=re.compile(r"price|valor", re.I))
         link_el  = card.find("a", href=True)
+        img_el   = card.find("img")
+        rooms_el = card.find(class_=re.compile(r"ambiente|room|dorm", re.I))
         link = link_el["href"] if link_el else ""
         if link and not link.startswith("http"):
             link = "https://www.zonaprop.com.ar" + link
+        image = img_el.get("src") or img_el.get("data-src") or "" if img_el else ""
         listings.append({
             "id":    str(lid),
             "title": title_el.get_text(strip=True)[:100] if title_el else "",
             "price": price_el.get_text(strip=True)[:60]  if price_el else "",
             "url":   link,
+            "image": image,
+            "rooms": rooms_el.get_text(strip=True) if rooms_el else "",
         })
     return listings
 
@@ -208,12 +213,52 @@ def _parse_list(items):
         url = item.get("url") or item.get("link") or item.get("permalink") or ""
         if url and not url.startswith("http"):
             url = "https://www.zonaprop.com.ar" + url
+
+        # ── Imagen principal ──────────────────────────────────────────────────
+        image = ""
+        photos = item.get("photos") or item.get("images") or item.get("pictures") or []
+        if isinstance(photos, list) and photos:
+            first_photo = photos[0]
+            if isinstance(first_photo, dict):
+                image = (first_photo.get("url") or first_photo.get("src") or
+                         first_photo.get("image") or first_photo.get("thumb") or "")
+            elif isinstance(first_photo, str):
+                image = first_photo
+        if not image:
+            image = item.get("mainImage") or item.get("thumbnail") or item.get("image") or ""
+
+        # ── Ambientes / habitaciones ──────────────────────────────────────────
+        rooms = ""
+        # Campo directo
+        for key in ("rooms", "ambientes", "totalRooms", "roomsAmount", "bedrooms"):
+            val = item.get(key)
+            if val is not None:
+                rooms = str(val)
+                break
+        # Buscar en atributos si no encontramos
+        if not rooms:
+            attrs = item.get("mainFeatures") or item.get("attributes") or item.get("features") or {}
+            if isinstance(attrs, dict):
+                for key in ("CFT100", "rooms", "ambientes", "bedrooms"):
+                    if key in attrs:
+                        rooms = str(attrs[key])
+                        break
+            elif isinstance(attrs, list):
+                for attr in attrs:
+                    if isinstance(attr, dict):
+                        label = str(attr.get("label", "") or attr.get("name", "")).lower()
+                        if "ambiente" in label or "room" in label or "dormit" in label:
+                            rooms = str(attr.get("value", ""))
+                            break
+
         if pid:
             results.append({
                 "id":    str(pid),
                 "title": title[:100],
                 "price": price[:60],
                 "url":   url,
+                "image": image,
+                "rooms": rooms,
             })
     return results
 
@@ -224,27 +269,50 @@ def send_email(smtp_cfg: dict, to: str, monitor_name: str, new_listings: list, s
     subject = f"🏠 {count} nuevo{'s' if count > 1 else ''} depto{'s' if count > 1 else ''} — {monitor_name}"
 
     # ── HTML body ─────────────────────────────────────────────────────────────
-    rows = ""
+    cards = ""
     for l in new_listings:
-        title = l["title"] or f"Propiedad {l['id']}"
-        price = l["price"] or "Precio no disponible"
-        url   = l["url"] or search_url
-        rows += f"""
-        <tr>
-          <td style="padding:12px 8px; border-bottom:1px solid #eee;">
-            <a href="{url}" style="font-weight:600; color:#1a1a2e; text-decoration:none; font-size:15px;">
+        title  = l.get("title") or f"Propiedad {l['id']}"
+        price  = l.get("price") or "Precio no disponible"
+        url    = l.get("url") or search_url
+        image  = l.get("image") or ""
+        rooms  = l.get("rooms") or ""
+
+        img_html = ""
+        if image:
+            img_html = f"""
+            <a href="{url}">
+              <img src="{image}" alt="Foto" width="100%"
+                   style="display:block; border-radius:8px 8px 0 0; max-height:200px;
+                          object-fit:cover; width:100%;">
+            </a>"""
+
+        rooms_badge = ""
+        if rooms:
+            rooms_badge = f"""<span style="display:inline-block; background:#f0f4ff; color:#1a1a2e;
+                                    font-size:12px; font-weight:600; padding:2px 8px;
+                                    border-radius:12px; margin-bottom:6px;">
+                                🛏 {rooms} ambiente{'s' if rooms != '1' else ''}
+                              </span><br>"""
+
+        cards += f"""
+        <div style="border:1px solid #eee; border-radius:8px; margin-bottom:16px; overflow:hidden;">
+          {img_html}
+          <div style="padding:14px 16px;">
+            {rooms_badge}
+            <a href="{url}" style="font-weight:600; color:#1a1a2e; text-decoration:none;
+                                    font-size:15px; line-height:1.4;">
               {title}
             </a><br>
-            <span style="color:#e63946; font-weight:700; font-size:14px;">{price}</span>
-          </td>
-          <td style="padding:12px 8px; border-bottom:1px solid #eee; text-align:right; white-space:nowrap;">
+            <span style="color:#e63946; font-weight:700; font-size:16px; display:block; margin:6px 0 10px;">
+              {price}
+            </span>
             <a href="{url}"
-               style="background:#e63946; color:#fff; padding:6px 14px; border-radius:6px;
-                      text-decoration:none; font-size:13px; font-weight:600;">
+               style="display:inline-block; background:#1a1a2e; color:#fff; padding:8px 18px;
+                      border-radius:6px; text-decoration:none; font-size:13px; font-weight:600;">
               Ver depto →
             </a>
-          </td>
-        </tr>"""
+          </div>
+        </div>"""
 
     html = f"""
 <!DOCTYPE html>
@@ -264,11 +332,9 @@ def send_email(smtp_cfg: dict, to: str, monitor_name: str, new_listings: list, s
         en tu búsqueda:
       </p>
 
-      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-        {rows}
-      </table>
+      {cards}
 
-      <div style="margin-top:24px; text-align:center;">
+      <div style="margin-top:8px; text-align:center;">
         <a href="{search_url}"
            style="display:inline-block; background:#1a1a2e; color:#fff; padding:12px 28px;
                   border-radius:8px; text-decoration:none; font-size:14px; font-weight:600;">
