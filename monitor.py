@@ -2,8 +2,8 @@
 """
 Zonaprop Server Monitor
 - Lee múltiples URLs desde config.json
-- Consulta todas en paralelo
-- Manda email cuando aparecen listings nuevos
+- Consulta secuencialmente (evita 403 por IP)
+- Manda email cuando aparecen listings nuevos con foto y ambientes
 - Guarda estado por búsqueda en data/
 """
 
@@ -12,9 +12,8 @@ import re
 import smtplib
 import ssl
 import sys
-import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -28,17 +27,17 @@ except ImportError:
     from bs4 import BeautifulSoup
 
 try:
-    from curl_cffi import requests as cf_requests
-    CURL_CFFI_OK = True
+    from curl_cffi import requests as cffi_requests
+    CURL_OK = True
 except ImportError:
-    CURL_CFFI_OK = False
+    CURL_OK = False
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
-BASE_DIR   = Path(__file__).parent
-CONFIG     = BASE_DIR / "config.json"
-DATA_DIR   = BASE_DIR / "data"
-LOG_FILE   = BASE_DIR / "monitor.log"
+BASE_DIR = Path(__file__).parent
+CONFIG   = BASE_DIR / "config.json"
+DATA_DIR = BASE_DIR / "data"
+LOG_FILE = BASE_DIR / "monitor.log"
 
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -66,24 +65,88 @@ def load_config():
 
 # ─── Estado por búsqueda ──────────────────────────────────────────────────────
 
-def state_file(monitor_name: str) -> Path:
+def state_file(monitor_name):
     safe = re.sub(r"[^\w\-]", "_", monitor_name)
     return DATA_DIR / f"{safe}.json"
 
-def load_seen(monitor_name: str) -> dict:
+def load_seen(monitor_name):
     f = state_file(monitor_name)
     if f.exists():
         with open(f) as fp:
             return json.load(fp)
     return {}
 
-def save_seen(monitor_name: str, data: dict):
+def save_seen(monitor_name, data):
     with open(state_file(monitor_name), "w") as fp:
         json.dump(data, fp, ensure_ascii=False, indent=2)
 
+# ─── Extracción de features ───────────────────────────────────────────────────
+
+def _extract_ambientes_from_features(features):
+    """Busca ambientes en mainFeatures. Devuelve string con el número o ''."""
+    if not features:
+        return ""
+    if isinstance(features, list):
+        for feat in features:
+            if not isinstance(feat, dict):
+                continue
+            label = str(feat.get("label", "")).lower()
+            value = str(feat.get("value", ""))
+            if re.search(r"amb|room|ambiente", label):
+                m = re.search(r"(\d+)", value)
+                if m:
+                    return m.group(1)
+            if re.search(r"(\d+)\s*amb", value, re.I):
+                m = re.search(r"(\d+)", value)
+                if m:
+                    return m.group(1)
+    if isinstance(features, dict):
+        for key, val in features.items():
+            val_str = str(val).lower()
+            if re.search(r"amb|room", val_str):
+                m = re.search(r"(\d+)", val_str)
+                if m:
+                    return m.group(1)
+    return ""
+
+
+def _extract_surface_from_features(features):
+    """Busca superficie (m²) en mainFeatures. Devuelve string como '70' o ''."""
+    if not features:
+        return ""
+    if isinstance(features, list):
+        for feat in features:
+            if not isinstance(feat, dict):
+                continue
+            label = str(feat.get("label", "")).lower()
+            value = str(feat.get("value", ""))
+            # Etiquetas típicas: "Superficie total", "Superficie cubierta", "m²"
+            if re.search(r"superficie|m²|m2|area|tamaño", label):
+                m = re.search(r"(\d+)", value)
+                if m:
+                    return m.group(1)
+            # Valor con "m²" explícito: "70 m²"
+            if re.search(r"(\d+)\s*m[²2]", value, re.I):
+                m = re.search(r"(\d+)", value)
+                if m:
+                    return m.group(1)
+    if isinstance(features, dict):
+        for key, val in features.items():
+            val_str = str(val)
+            if re.search(r"(\d+)\s*m[²2]", val_str, re.I):
+                m = re.search(r"(\d+)", val_str)
+                if m:
+                    return m.group(1)
+    return ""
+
 # ─── Scraping ─────────────────────────────────────────────────────────────────
 
-def _parse_html(html: str, url: str) -> list:
+HEADERS = {
+    "Accept-Language": "es-AR,es;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+def _parse_html(html, url):
     """Extrae listings del HTML de la página."""
     # ── Método 1: __NEXT_DATA__ ───────────────────────────────────────────────
     match = re.search(
@@ -110,67 +173,79 @@ def _parse_html(html: str, url: str) -> list:
         lid = card.get("data-id") or card.get("data-posting-id") or card.get("id", "")
         if not lid:
             continue
+
         title_el = card.find(class_=re.compile(r"title|address|location", re.I))
         price_el = card.find(class_=re.compile(r"price|valor", re.I))
         link_el  = card.find("a", href=True)
-        img_el   = card.find("img")
-        # Selector exacto de Zonaprop para ambientes en el listado
-        rooms_el = (
-            card.find("span", class_=re.compile(r"postingMainFeatures.*span", re.I))
-            or card.find(class_=re.compile(r"ambiente|room|dorm", re.I))
-        )
         link = link_el["href"] if link_el else ""
         if link and not link.startswith("http"):
             link = "https://www.zonaprop.com.ar" + link
-        image = img_el.get("src") or img_el.get("data-src") or "" if img_el else ""
 
-        # Limpiar el texto de ambientes: "2 amb." → "2"
-        rooms_text = rooms_el.get_text(strip=True) if rooms_el else ""
-        rooms_num = re.search(r"(\d+)", rooms_text)
-        rooms = rooms_num.group(1) if rooms_num else ""
+        # Foto
+        img_el = card.find("img")
+        photo = img_el.get("src") or img_el.get("data-src", "") if img_el else ""
+
+        # Ambientes y m²: buscar spans de postingMainFeatures
+        rooms = ""
+        surface = ""
+        features_spans = card.find_all(
+            "span", class_=re.compile(r"postingMainFeatures.*span", re.I)
+        )
+        for span in features_spans:
+            text = span.get_text(strip=True)
+            if not rooms and re.search(r"amb", text, re.I):
+                m = re.search(r"(\d+)", text)
+                if m:
+                    rooms = m.group(1)
+            if not surface and re.search(r"m[²2]", text, re.I):
+                m = re.search(r"(\d+)", text)
+                if m:
+                    surface = m.group(1)
 
         listings.append({
-            "id":    str(lid),
-            "title": title_el.get_text(strip=True)[:100] if title_el else "",
-            "price": price_el.get_text(strip=True)[:60]  if price_el else "",
-            "url":   link,
-            "image": image,
-            "rooms": rooms,
+            "id":      str(lid),
+            "title":   title_el.get_text(strip=True)[:100] if title_el else "",
+            "price":   price_el.get_text(strip=True)[:60]  if price_el else "",
+            "url":     link,
+            "photo":   photo,
+            "rooms":   rooms,
+            "surface": surface,
         })
     return listings
 
 
-def fetch_listings(url: str) -> list:
-    """
-    Obtiene listings usando curl_cffi, que imita el TLS fingerprint
-    exacto de Chrome para evitar el bloqueo de Cloudflare.
-    """
-    if not CURL_CFFI_OK:
-        raise RuntimeError("curl_cffi no está instalado. Corré: pip install curl_cffi")
-
-    # Reintentos con delay creciente para evitar bloqueos por requests simultáneos
-    for attempt in range(1, 4):
-        if attempt > 1:
-            wait = attempt * 5
-            log.info(f"  Reintento {attempt}/3 en {wait}s...")
-            time.sleep(wait)
-
-        resp = cf_requests.get(
-            url,
-            impersonate="chrome120",
-            headers={"Accept-Language": "es-AR,es;q=0.9"},
-            timeout=30,
+def fetch_listings(url, retries=3):
+    """Obtiene listings usando curl_cffi (impersona Chrome, evita Cloudflare)."""
+    if not CURL_OK:
+        raise RuntimeError(
+            "curl_cffi no está instalado. Corré: pip install curl_cffi"
         )
 
-        if resp.status_code == 200:
-            break
-        if resp.status_code == 403 and attempt < 3:
-            log.warning(f"  403 en intento {attempt}, reintentando...")
-            continue
-        resp.raise_for_status()
+    last_err = None
+    for attempt in range(retries):
+        if attempt > 0:
+            delay = attempt * 5
+            log.info(f"  Reintento {attempt}/{retries-1} en {delay}s...")
+            time.sleep(delay)
+        try:
+            resp = cffi_requests.get(
+                url,
+                impersonate="chrome120",
+                headers=HEADERS,
+                timeout=30,
+            )
+            if resp.status_code == 403:
+                log.warning(f"  403 Forbidden en intento {attempt+1}")
+                last_err = Exception(f"HTTP 403")
+                continue
+            resp.raise_for_status()
+            log.info(f"  HTTP {resp.status_code} OK")
+            return _parse_html(resp.text, url)
+        except Exception as e:
+            last_err = e
+            log.warning(f"  Error en intento {attempt+1}: {e}")
 
-    log.info(f"  Respuesta: {resp.status_code} ({len(resp.text)} chars)")
-    return _parse_html(resp.text, url)
+    raise last_err or Exception("fetch_listings: sin respuesta")
 
 
 def _find_postings(data, depth=0):
@@ -207,8 +282,11 @@ def _parse_list(items):
     for item in items:
         pid = (item.get("id") or item.get("postingId") or
                item.get("posting_id") or item.get("propertyId") or "")
+
         title = (item.get("title") or item.get("address") or
                  item.get("fullAddress") or item.get("location") or "")
+
+        # ── Precio ────────────────────────────────────────────────────────────
         price_data = item.get("priceOperationTypes") or item.get("price") or {}
         if isinstance(price_data, list) and price_data:
             price_data = price_data[0]
@@ -220,125 +298,131 @@ def _parse_list(items):
                 price = f"{p.get('currency','')} {p.get('amount','')}".strip()
         elif isinstance(price_data, (str, int, float)):
             price = str(price_data)
+
+        # ── URL ───────────────────────────────────────────────────────────────
         url = item.get("url") or item.get("link") or item.get("permalink") or ""
         if url and not url.startswith("http"):
             url = "https://www.zonaprop.com.ar" + url
 
-        # ── Imagen principal ──────────────────────────────────────────────────
-        image = ""
-        photos = item.get("photos") or item.get("images") or item.get("pictures") or []
+        # ── Foto ──────────────────────────────────────────────────────────────
+        photo = ""
+        # Zonaprop suele tener photos/pictures como lista o dict
+        photos = item.get("photos") or item.get("pictures") or item.get("images") or []
         if isinstance(photos, list) and photos:
             first_photo = photos[0]
             if isinstance(first_photo, dict):
-                image = (first_photo.get("url") or first_photo.get("src") or
-                         first_photo.get("image") or first_photo.get("thumb") or "")
+                photo = (first_photo.get("url") or first_photo.get("src") or
+                         first_photo.get("image") or "")
             elif isinstance(first_photo, str):
-                image = first_photo
-        if not image:
-            image = item.get("mainImage") or item.get("thumbnail") or item.get("image") or ""
+                photo = first_photo
+        elif isinstance(photos, dict):
+            photo = photos.get("url") or photos.get("src") or ""
+        # Alternativa: campo directo
+        if not photo:
+            photo = item.get("thumbnail") or item.get("mainPhoto") or item.get("coverPhoto") or ""
+            if isinstance(photo, dict):
+                photo = photo.get("url") or photo.get("src") or ""
 
-        # ── Ambientes / habitaciones ──────────────────────────────────────────
-        rooms = ""
-        # Campo directo
-        for key in ("rooms", "ambientes", "totalRooms", "roomsAmount", "bedrooms"):
-            val = item.get(key)
-            if val is not None:
-                rooms = str(val)
-                break
-        # Buscar en mainFeatures (estructura de Zonaprop: {"CFT100": "2", ...})
+        # ── Ambientes y superficie ────────────────────────────────────────────
+        main_features = item.get("mainFeatures") or item.get("features") or []
+
+        rooms = _extract_ambientes_from_features(main_features)
         if not rooms:
-            attrs = item.get("mainFeatures") or item.get("attributes") or item.get("features") or {}
-            if isinstance(attrs, dict):
-                # CFT100 = ambientes en la API de Zonaprop
-                for key in ("CFT100", "rooms", "ambientes", "bedrooms"):
-                    if key in attrs:
-                        val = attrs[key]
-                        # puede ser {"label": "2 amb.", "value": 2} o directo "2"
-                        if isinstance(val, dict):
-                            rooms = str(val.get("value") or val.get("label", ""))
-                        else:
-                            rooms = str(val)
+            for key in ("totalRooms", "roomsAmount", "suites", "rooms"):
+                val = item.get(key)
+                if val is not None:
+                    m = re.search(r"(\d+)", str(val))
+                    if m:
+                        rooms = m.group(1)
                         break
-            elif isinstance(attrs, list):
-                for attr in attrs:
-                    if isinstance(attr, dict):
-                        label = str(attr.get("label", "") or attr.get("name", "")).lower()
-                        if "ambiente" in label or "room" in label or "dormit" in label:
-                            rooms = str(attr.get("value", ""))
-                            break
 
-        # Extraer solo el número si quedó algo como "2 amb."
-        rooms_num = re.search(r"(\d+)", rooms)
-        rooms = rooms_num.group(1) if rooms_num else rooms
+        surface = _extract_surface_from_features(main_features)
+        if not surface:
+            for key in ("surface", "totalArea", "coveredArea", "squareMeters", "area"):
+                val = item.get(key)
+                if val is not None:
+                    m = re.search(r"(\d+)", str(val))
+                    if m:
+                        surface = m.group(1)
+                        break
 
         if pid:
             results.append({
-                "id":    str(pid),
-                "title": title[:100],
-                "price": price[:60],
-                "url":   url,
-                "image": image,
-                "rooms": rooms,
+                "id":      str(pid),
+                "title":   title[:100],
+                "price":   price[:60],
+                "url":     url,
+                "photo":   photo,
+                "rooms":   rooms,
+                "surface": surface,
             })
     return results
 
 # ─── Email ────────────────────────────────────────────────────────────────────
 
-def send_email(smtp_cfg: dict, to: str, monitor_name: str, new_listings: list, search_url: str):
+def send_email(smtp_cfg, to, monitor_name, new_listings, search_url):
     count = len(new_listings)
     subject = f"🏠 {count} nuevo{'s' if count > 1 else ''} depto{'s' if count > 1 else ''} — {monitor_name}"
 
-    # ── HTML body ─────────────────────────────────────────────────────────────
-    cards = ""
+    rows = ""
     for l in new_listings:
-        title  = l.get("title") or f"Propiedad {l['id']}"
-        price  = l.get("price") or "Precio no disponible"
-        url    = l.get("url") or search_url
-        image  = l.get("image") or ""
-        rooms  = l.get("rooms") or ""
+        title = l.get("title") or f"Propiedad {l['id']}"
+        price = l.get("price") or "Precio no disponible"
+        url   = l.get("url")   or search_url
+        photo   = l.get("photo")   or ""
+        rooms   = l.get("rooms")   or ""
+        surface = l.get("surface") or ""
 
-        img_html = ""
-        if image:
-            img_html = f"""
-            <a href="{url}">
-              <img src="{image}" alt="Foto" width="100%"
-                   style="display:block; border-radius:8px 8px 0 0; max-height:200px;
-                          object-fit:cover; width:100%;">
-            </a>"""
-
-        rooms_badge = ""
+        badges = ""
         if rooms:
-            rooms_badge = f"""<span style="display:inline-block; background:#f0f4ff; color:#1a1a2e;
-                                    font-size:12px; font-weight:600; padding:2px 8px;
-                                    border-radius:12px; margin-bottom:6px;">
-                                🛏 {rooms} ambiente{'s' if rooms != '1' else ''}
-                              </span><br>"""
+            badges += (
+                f'<span style="display:inline-block; background:#e8f4fd; color:#1a73e8; '
+                f'font-size:12px; font-weight:600; padding:2px 8px; border-radius:12px; margin-left:6px;">'
+                f'{rooms} amb.</span>'
+            )
+        if surface:
+            badges += (
+                f'<span style="display:inline-block; background:#f0fdf4; color:#16a34a; '
+                f'font-size:12px; font-weight:600; padding:2px 8px; border-radius:12px; margin-left:4px;">'
+                f'{surface} m²</span>'
+            )
 
-        cards += f"""
-        <div style="border:1px solid #eee; border-radius:8px; margin-bottom:16px; overflow:hidden;">
-          {img_html}
-          <div style="padding:14px 16px;">
-            {rooms_badge}
-            <a href="{url}" style="font-weight:600; color:#1a1a2e; text-decoration:none;
-                                    font-size:15px; line-height:1.4;">
+        photo_cell = (
+            f'<td style="width:100px; padding:8px; border-bottom:1px solid #eee; vertical-align:top;">'
+            f'<a href="{url}"><img src="{photo}" width="90" height="65" '
+            f'style="object-fit:cover; border-radius:6px; display:block;" '
+            f'alt="foto"></a></td>'
+        ) if photo else (
+            f'<td style="width:100px; padding:8px; border-bottom:1px solid #eee; vertical-align:top;">'
+            f'<div style="width:90px; height:65px; background:#f0f0f0; border-radius:6px; '
+            f'display:flex; align-items:center; justify-content:center; '
+            f'font-size:24px;">🏠</div></td>'
+        )
+
+        rows += f"""
+        <tr>
+          {photo_cell}
+          <td style="padding:12px 8px; border-bottom:1px solid #eee; vertical-align:top;">
+            <a href="{url}" style="font-weight:600; color:#1a1a2e; text-decoration:none; font-size:15px;">
               {title}
-            </a><br>
-            <span style="color:#e63946; font-weight:700; font-size:16px; display:block; margin:6px 0 10px;">
-              {price}
-            </span>
+            </a>{badges}<br>
+            <span style="color:#e63946; font-weight:700; font-size:14px;">{price}</span>
+          </td>
+          <td style="padding:12px 8px; border-bottom:1px solid #eee; text-align:right;
+                     white-space:nowrap; vertical-align:middle;">
             <a href="{url}"
-               style="display:inline-block; background:#1a1a2e; color:#fff; padding:8px 18px;
-                      border-radius:6px; text-decoration:none; font-size:13px; font-weight:600;">
+               style="background:#e63946; color:#fff; padding:6px 14px; border-radius:6px;
+                      text-decoration:none; font-size:13px; font-weight:600;">
               Ver depto →
             </a>
-          </div>
-        </div>"""
+          </td>
+        </tr>"""
 
     html = f"""
 <!DOCTYPE html>
 <html>
 <body style="margin:0; padding:0; background:#f5f5f5; font-family:Arial,sans-serif;">
-  <div style="max-width:600px; margin:32px auto; background:#fff; border-radius:12px;
+  <div style="max-width:640px; margin:32px auto; background:#fff; border-radius:12px;
               box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
 
     <div style="background:#1a1a2e; padding:24px 32px;">
@@ -352,9 +436,11 @@ def send_email(smtp_cfg: dict, to: str, monitor_name: str, new_listings: list, s
         en tu búsqueda:
       </p>
 
-      {cards}
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        {rows}
+      </table>
 
-      <div style="margin-top:8px; text-align:center;">
+      <div style="margin-top:24px; text-align:center;">
         <a href="{search_url}"
            style="display:inline-block; background:#1a1a2e; color:#fff; padding:12px 28px;
                   border-radius:8px; text-decoration:none; font-size:14px; font-weight:600;">
@@ -379,42 +465,36 @@ def send_email(smtp_cfg: dict, to: str, monitor_name: str, new_listings: list, s
     msg["To"]      = to
     msg.attach(MIMEText(html, "html"))
 
-    port = int(smtp_cfg["port"])
-    host = smtp_cfg["host"]
-
-    log.info(f"  Conectando a {host}:{port}...")
+    # Intentar primero con STARTTLS (587), luego SSL (465)
+    sent = False
+    errors = []
     try:
-        if port == 465:
-            # SSL directo
-            import ssl
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP_SSL(host, port, timeout=15, context=ctx) as server:
-                server.login(smtp_cfg["username"], smtp_cfg["password"])
-                server.sendmail(smtp_cfg["username"], to, msg.as_string())
-        else:
-            # STARTTLS (587 o 25)
-            with smtplib.SMTP(host, port, timeout=15) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(smtp_cfg["username"], smtp_cfg["password"])
-                server.sendmail(smtp_cfg["username"], to, msg.as_string())
-    except (OSError, smtplib.SMTPException) as e:
-        if port != 465:
-            log.warning(f"  Puerto {port} falló ({e}), reintentando con 465...")
-            import ssl
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP_SSL(host, 465, timeout=15, context=ctx) as server:
-                server.login(smtp_cfg["username"], smtp_cfg["password"])
-                server.sendmail(smtp_cfg["username"], to, msg.as_string())
-        else:
-            raise
+        with smtplib.SMTP(smtp_cfg["host"], smtp_cfg["port"], timeout=15) as server:
+            server.starttls()
+            server.login(smtp_cfg["username"], smtp_cfg["password"])
+            server.sendmail(smtp_cfg["username"], to, msg.as_string())
+        sent = True
+    except Exception as e:
+        errors.append(f"STARTTLS:{e}")
 
-    log.info(f"  📧 Email enviado a {to}")
+    if not sent:
+        try:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_cfg["host"], 465, context=ctx, timeout=15) as server:
+                server.login(smtp_cfg["username"], smtp_cfg["password"])
+                server.sendmail(smtp_cfg["username"], to, msg.as_string())
+            sent = True
+        except Exception as e:
+            errors.append(f"SSL:{e}")
+
+    if sent:
+        log.info(f"  📧 Email enviado a {to}")
+    else:
+        raise Exception(f"No se pudo enviar email: {'; '.join(errors)}")
 
 # ─── Chequeo de una búsqueda ──────────────────────────────────────────────────
 
-def check_monitor(monitor: dict, smtp_cfg: dict):
+def check_monitor(monitor, smtp_cfg):
     name  = monitor["name"]
     url   = monitor["url"]
     email = monitor["notify_email"]
@@ -438,7 +518,11 @@ def check_monitor(monitor: dict, smtp_cfg: dict):
 
     if new_listings:
         for l in new_listings:
-            log.info(f"[{name}]  🆕 {l['title']} — {l['price']} — {l['url']}")
+            meta = []
+            if l.get("rooms"):   meta.append(f"{l['rooms']} amb.")
+            if l.get("surface"): meta.append(f"{l['surface']} m²")
+            meta_str = f" | {', '.join(meta)}" if meta else ""
+            log.info(f"[{name}]  🆕 {l['title']}{meta_str} — {l['price']} — {l['url']}")
         try:
             send_email(smtp_cfg, email, name, new_listings, url)
         except Exception as e:
@@ -451,6 +535,8 @@ def check_monitor(monitor: dict, smtp_cfg: dict):
             "title":      l["title"],
             "price":      l["price"],
             "url":        l["url"],
+            "rooms":      l.get("rooms", ""),
+            "surface":    l.get("surface", ""),
             "first_seen": seen.get(l["id"], {}).get("first_seen", now),
         }
     save_seen(name, seen)
@@ -465,11 +551,12 @@ def main():
     smtp_cfg = cfg["smtp"]
     monitors = cfg["monitors"]
 
-    log.info(f"Monitoreando {len(monitors)} búsqueda(s)")
+    log.info(f"Monitoreando {len(monitors)} búsqueda(s) secuencialmente")
 
     for i, monitor in enumerate(monitors):
         if i > 0:
-            time.sleep(10)  # pausa entre requests para no gatillar Cloudflare
+            log.info("  Esperando 10s antes de la siguiente búsqueda...")
+            time.sleep(10)
         try:
             check_monitor(monitor, smtp_cfg)
         except Exception as e:
