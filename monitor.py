@@ -114,18 +114,28 @@ def _parse_html(html: str, url: str) -> list:
         price_el = card.find(class_=re.compile(r"price|valor", re.I))
         link_el  = card.find("a", href=True)
         img_el   = card.find("img")
-        rooms_el = card.find(class_=re.compile(r"ambiente|room|dorm", re.I))
+        # Selector exacto de Zonaprop para ambientes en el listado
+        rooms_el = (
+            card.find("span", class_=re.compile(r"postingMainFeatures.*span", re.I))
+            or card.find(class_=re.compile(r"ambiente|room|dorm", re.I))
+        )
         link = link_el["href"] if link_el else ""
         if link and not link.startswith("http"):
             link = "https://www.zonaprop.com.ar" + link
         image = img_el.get("src") or img_el.get("data-src") or "" if img_el else ""
+
+        # Limpiar el texto de ambientes: "2 amb." → "2"
+        rooms_text = rooms_el.get_text(strip=True) if rooms_el else ""
+        rooms_num = re.search(r"(\d+)", rooms_text)
+        rooms = rooms_num.group(1) if rooms_num else ""
+
         listings.append({
             "id":    str(lid),
             "title": title_el.get_text(strip=True)[:100] if title_el else "",
             "price": price_el.get_text(strip=True)[:60]  if price_el else "",
             "url":   link,
             "image": image,
-            "rooms": rooms_el.get_text(strip=True) if rooms_el else "",
+            "rooms": rooms,
         })
     return listings
 
@@ -235,13 +245,19 @@ def _parse_list(items):
             if val is not None:
                 rooms = str(val)
                 break
-        # Buscar en atributos si no encontramos
+        # Buscar en mainFeatures (estructura de Zonaprop: {"CFT100": "2", ...})
         if not rooms:
             attrs = item.get("mainFeatures") or item.get("attributes") or item.get("features") or {}
             if isinstance(attrs, dict):
+                # CFT100 = ambientes en la API de Zonaprop
                 for key in ("CFT100", "rooms", "ambientes", "bedrooms"):
                     if key in attrs:
-                        rooms = str(attrs[key])
+                        val = attrs[key]
+                        # puede ser {"label": "2 amb.", "value": 2} o directo "2"
+                        if isinstance(val, dict):
+                            rooms = str(val.get("value") or val.get("label", ""))
+                        else:
+                            rooms = str(val)
                         break
             elif isinstance(attrs, list):
                 for attr in attrs:
@@ -250,6 +266,10 @@ def _parse_list(items):
                         if "ambiente" in label or "room" in label or "dormit" in label:
                             rooms = str(attr.get("value", ""))
                             break
+
+        # Extraer solo el número si quedó algo como "2 amb."
+        rooms_num = re.search(r"(\d+)", rooms)
+        rooms = rooms_num.group(1) if rooms_num else rooms
 
         if pid:
             results.append({
