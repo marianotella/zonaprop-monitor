@@ -149,13 +149,15 @@ def fetch_listings(url: str) -> list:
         """)
 
         page = context.new_page()
-        page.goto(url, wait_until="networkidle", timeout=60000)
 
-        # Esperar a que carguen los listings
+        # "load" espera que el DOM esté listo sin importar requests pendientes
+        page.goto(url, wait_until="load", timeout=30000)
+
+        # Esperar a que aparezcan los listings en el DOM
         try:
-            page.wait_for_selector("[data-id], [data-posting-id], .postingCard", timeout=15000)
+            page.wait_for_selector("[data-id], [data-posting-id], .postingCard", timeout=10000)
         except Exception:
-            pass  # continuar igual e intentar parsear lo que haya
+            pass  # intentar parsear lo que haya igual
 
         html = page.content()
         browser.close()
