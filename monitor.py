@@ -10,8 +10,10 @@ Zonaprop Server Monitor
 import json
 import re
 import smtplib
+import ssl
 import sys
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -131,20 +133,28 @@ def fetch_listings(url: str) -> list:
     if not CURL_CFFI_OK:
         raise RuntimeError("curl_cffi no está instalado. Corré: pip install curl_cffi")
 
-    resp = cf_requests.get(
-        url,
-        impersonate="chrome120",
-        headers={"Accept-Language": "es-AR,es;q=0.9"},
-        timeout=30,
-    )
-    resp.raise_for_status()
+    # Reintentos con delay creciente para evitar bloqueos por requests simultáneos
+    for attempt in range(1, 4):
+        if attempt > 1:
+            wait = attempt * 5
+            log.info(f"  Reintento {attempt}/3 en {wait}s...")
+            time.sleep(wait)
 
-    # Guardar HTML para debug
-    debug_file = DATA_DIR / "debug_last_page.html"
-    with open(debug_file, "w", encoding="utf-8") as f:
-        f.write(resp.text)
+        resp = cf_requests.get(
+            url,
+            impersonate="chrome120",
+            headers={"Accept-Language": "es-AR,es;q=0.9"},
+            timeout=30,
+        )
+
+        if resp.status_code == 200:
+            break
+        if resp.status_code == 403 and attempt < 3:
+            log.warning(f"  403 en intento {attempt}, reintentando...")
+            continue
+        resp.raise_for_status()
+
     log.info(f"  Respuesta: {resp.status_code} ({len(resp.text)} chars)")
-
     return _parse_html(resp.text, url)
 
 
@@ -283,10 +293,36 @@ def send_email(smtp_cfg: dict, to: str, monitor_name: str, new_listings: list, s
     msg["To"]      = to
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP(smtp_cfg["host"], smtp_cfg["port"]) as server:
-        server.starttls()
-        server.login(smtp_cfg["username"], smtp_cfg["password"])
-        server.sendmail(smtp_cfg["username"], to, msg.as_string())
+    port = int(smtp_cfg["port"])
+    host = smtp_cfg["host"]
+
+    log.info(f"  Conectando a {host}:{port}...")
+    try:
+        if port == 465:
+            # SSL directo
+            import ssl
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, timeout=15, context=ctx) as server:
+                server.login(smtp_cfg["username"], smtp_cfg["password"])
+                server.sendmail(smtp_cfg["username"], to, msg.as_string())
+        else:
+            # STARTTLS (587 o 25)
+            with smtplib.SMTP(host, port, timeout=15) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(smtp_cfg["username"], smtp_cfg["password"])
+                server.sendmail(smtp_cfg["username"], to, msg.as_string())
+    except (OSError, smtplib.SMTPException) as e:
+        if port != 465:
+            log.warning(f"  Puerto {port} falló ({e}), reintentando con 465...")
+            import ssl
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, 465, timeout=15, context=ctx) as server:
+                server.login(smtp_cfg["username"], smtp_cfg["password"])
+                server.sendmail(smtp_cfg["username"], to, msg.as_string())
+        else:
+            raise
 
     log.info(f"  📧 Email enviado a {to}")
 
@@ -343,19 +379,15 @@ def main():
     smtp_cfg = cfg["smtp"]
     monitors = cfg["monitors"]
 
-    log.info(f"Monitoreando {len(monitors)} búsqueda(s) en paralelo")
+    log.info(f"Monitoreando {len(monitors)} búsqueda(s)")
 
-    with ThreadPoolExecutor(max_workers=len(monitors)) as executor:
-        futures = {
-            executor.submit(check_monitor, m, smtp_cfg): m["name"]
-            for m in monitors
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                future.result()
-            except Exception as e:
-                log.error(f"[{name}] Error inesperado: {e}")
+    for i, monitor in enumerate(monitors):
+        if i > 0:
+            time.sleep(10)  # pausa entre requests para no gatillar Cloudflare
+        try:
+            check_monitor(monitor, smtp_cfg)
+        except Exception as e:
+            log.error(f"[{monitor['name']}] Error inesperado: {e}")
 
     log.info("Listo.")
 
