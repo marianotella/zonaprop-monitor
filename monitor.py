@@ -26,16 +26,10 @@ except ImportError:
     from bs4 import BeautifulSoup
 
 try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_OK = True
+    from curl_cffi import requests as cf_requests
+    CURL_CFFI_OK = True
 except ImportError:
-    PLAYWRIGHT_OK = False
-
-try:
-    from playwright_stealth import stealth_sync
-    STEALTH_OK = True
-except ImportError:
-    STEALTH_OK = False
+    CURL_CFFI_OK = False
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -130,56 +124,28 @@ def _parse_html(html: str, url: str) -> list:
 
 
 def fetch_listings(url: str) -> list:
-    """Obtiene listings usando Playwright (navegador real headless)."""
-    if not PLAYWRIGHT_OK:
-        raise RuntimeError("Playwright no está instalado. Corré: pip install playwright && playwright install chromium --with-deps")
+    """
+    Obtiene listings usando curl_cffi, que imita el TLS fingerprint
+    exacto de Chrome para evitar el bloqueo de Cloudflare.
+    """
+    if not CURL_CFFI_OK:
+        raise RuntimeError("curl_cffi no está instalado. Corré: pip install curl_cffi")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            locale="es-AR",
-            viewport={"width": 1280, "height": 800},
-        )
-        # Ocultar que es un navegador automatizado
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
+    resp = cf_requests.get(
+        url,
+        impersonate="chrome120",
+        headers={"Accept-Language": "es-AR,es;q=0.9"},
+        timeout=30,
+    )
+    resp.raise_for_status()
 
-        page = context.new_page()
-        if STEALTH_OK:
-            stealth_sync(page)  # parchea fingerprints que detecta Cloudflare
-        else:
-            log.warning("  playwright-stealth no instalado, puede haber detección de bot")
+    # Guardar HTML para debug
+    debug_file = DATA_DIR / "debug_last_page.html"
+    with open(debug_file, "w", encoding="utf-8") as f:
+        f.write(resp.text)
+    log.info(f"  Respuesta: {resp.status_code} ({len(resp.text)} chars)")
 
-        # "load" espera que el DOM esté listo sin importar requests pendientes
-        page.goto(url, wait_until="load", timeout=30000)
-
-        # Esperar a que aparezcan los listings en el DOM
-        try:
-            page.wait_for_selector("[data-id], [data-posting-id], .postingCard", timeout=10000)
-        except Exception:
-            pass  # intentar parsear lo que haya igual
-
-        html = page.content()
-
-        # Guardar HTML para debug
-        debug_file = DATA_DIR / "debug_last_page.html"
-        with open(debug_file, "w", encoding="utf-8") as f:
-            f.write(html)
-        log.info(f"  HTML guardado en {debug_file} ({len(html)} chars)")
-
-        browser.close()
-
-    return _parse_html(html, url)
+    return _parse_html(resp.text, url)
 
 
 def _find_postings(data, depth=0):

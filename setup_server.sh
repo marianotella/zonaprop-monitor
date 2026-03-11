@@ -163,12 +163,8 @@ if [ ! -f "$INSTALL_DIR/venv/bin/pip" ]; then
 fi
 
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip --quiet
-"$INSTALL_DIR/venv/bin/pip" install playwright playwright-stealth beautifulsoup4 --quiet
-echo "✅  Dependencias Python instaladas"
-
-echo "📦  Instalando Chromium (navegador headless)..."
-"$INSTALL_DIR/venv/bin/playwright" install chromium --with-deps
-echo "✅  Chromium instalado"
+"$INSTALL_DIR/venv/bin/pip" install curl_cffi beautifulsoup4 --quiet
+echo "✅  Dependencias instaladas"
 
 # ─── Cron job ─────────────────────────────────────────────────────────────────
 # Si se saltó la config, leer intervalo del cron existente o usar 60 por defecto
