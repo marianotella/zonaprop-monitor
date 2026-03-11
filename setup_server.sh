@@ -163,7 +163,7 @@ if [ ! -f "$INSTALL_DIR/venv/bin/pip" ]; then
 fi
 
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip --quiet
-"$INSTALL_DIR/venv/bin/pip" install playwright beautifulsoup4 --quiet
+"$INSTALL_DIR/venv/bin/pip" install playwright playwright-stealth beautifulsoup4 --quiet
 echo "✅  Dependencias Python instaladas"
 
 echo "📦  Instalando Chromium (navegador headless)..."
