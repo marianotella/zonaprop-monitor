@@ -16,91 +16,107 @@ echo "🏠  Zonaprop Server Monitor — Setup"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ─── SMTP ─────────────────────────────────────────────────────────────────────
-echo "Configuración de email (para enviar notificaciones)"
-echo ""
-echo -n "SMTP host   [smtp.gmail.com]: "
-read -r SMTP_HOST
-SMTP_HOST="${SMTP_HOST:-smtp.gmail.com}"
-
-echo -n "SMTP port   [587]: "
-read -r SMTP_PORT
-SMTP_PORT="${SMTP_PORT:-587}"
-
-echo -n "Email (usuario SMTP): "
-read -r SMTP_USER
-
-echo -n "Contraseña / App Password: "
-read -r -s SMTP_PASS
-echo ""
-
-# ─── Búsquedas ────────────────────────────────────────────────────────────────
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Búsquedas a monitorear"
-echo "(podés agregar más después editando config.json)"
-echo ""
-
-MONITORS_JSON=""
-INDEX=1
-
-while true; do
-  echo "── Búsqueda #$INDEX ──────────────────────────────────"
-  echo -n "Nombre (ej: Tella - Almagro): "
-  read -r MON_NAME
-
-  echo -n "URL de Zonaprop: "
-  read -r MON_URL
-  MON_URL="$(echo "$MON_URL" | tr -d '[:space:]')"
-
-  echo -n "Email a notificar: "
-  read -r MON_EMAIL
-
-  ENTRY=$(printf '    {\n      "name": "%s",\n      "url": "%s",\n      "notify_email": "%s"\n    }' \
-    "$MON_NAME" "$MON_URL" "$MON_EMAIL")
-
-  if [ -n "$MONITORS_JSON" ]; then
-    MONITORS_JSON="$MONITORS_JSON,\n$ENTRY"
-  else
-    MONITORS_JSON="$ENTRY"
-  fi
-
+# ─── ¿Ya existe config.json? ──────────────────────────────────────────────────
+SKIP_CONFIG=false
+if [ -f "$INSTALL_DIR/config.json" ]; then
+  echo "Se encontró un config.json existente:"
   echo ""
-  echo -n "¿Agregar otra búsqueda? [s/N]: "
-  read -r MORE
+  cat "$INSTALL_DIR/config.json"
   echo ""
-  if [[ ! "$MORE" =~ ^[sS]$ ]]; then
-    break
+  echo -n "¿Usar esta configuración? [S/n]: "
+  read -r USE_EXISTING
+  USE_EXISTING="$(echo "${USE_EXISTING:-s}" | tr -d '[:space:]')"
+  if [[ "$USE_EXISTING" =~ ^[sS]$ ]] || [ -z "$USE_EXISTING" ]; then
+    SKIP_CONFIG=true
+    echo ""
+    echo "✅  Usando config.json existente"
   fi
-  INDEX=$((INDEX + 1))
-done
-
-# ─── Intervalo ────────────────────────────────────────────────────────────────
-echo "¿Cada cuántos minutos revisar? [60]: "
-read -r INTERVAL_MINS
-INTERVAL_MINS="$(echo "${INTERVAL_MINS:-60}" | tr -d '[:space:]')"
-INTERVAL_MINS="${INTERVAL_MINS:-60}"
-
-# ─── Confirmar ────────────────────────────────────────────────────────────────
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  SMTP:       $SMTP_USER @ $SMTP_HOST:$SMTP_PORT"
-echo "  Búsquedas:  $INDEX"
-echo "  Intervalo:  cada $INTERVAL_MINS minutos"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo -n "¿Confirmar? [s/N]: "
-read -r CONFIRM
-if [[ ! "$CONFIRM" =~ ^[sS]$ ]]; then
-  echo "Instalación cancelada."
-  exit 0
 fi
 
-echo ""
-echo "📦  Instalando..."
+if [ "$SKIP_CONFIG" = false ]; then
 
-# ─── Escribir config.json ─────────────────────────────────────────────────────
-cat > "$INSTALL_DIR/config.json" <<CONFIG
+  # ─── SMTP ───────────────────────────────────────────────────────────────────
+  echo "Configuración de email (para enviar notificaciones)"
+  echo ""
+  echo -n "SMTP host   [smtp.gmail.com]: "
+  read -r SMTP_HOST
+  SMTP_HOST="${SMTP_HOST:-smtp.gmail.com}"
+
+  echo -n "SMTP port   [587]: "
+  read -r SMTP_PORT
+  SMTP_PORT="${SMTP_PORT:-587}"
+
+  echo -n "Email (usuario SMTP): "
+  read -r SMTP_USER
+
+  echo -n "Contraseña / App Password: "
+  read -r -s SMTP_PASS
+  echo ""
+
+  # ─── Búsquedas ──────────────────────────────────────────────────────────────
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Búsquedas a monitorear"
+  echo "(podés agregar más después editando config.json)"
+  echo ""
+
+  MONITORS_JSON=""
+  INDEX=1
+
+  while true; do
+    echo "── Búsqueda #$INDEX ──────────────────────────────────"
+    echo -n "Nombre (ej: Tella - Almagro): "
+    read -r MON_NAME
+
+    echo -n "URL de Zonaprop: "
+    read -r MON_URL
+    MON_URL="$(echo "$MON_URL" | tr -d '[:space:]')"
+
+    echo -n "Email a notificar: "
+    read -r MON_EMAIL
+
+    ENTRY=$(printf '    {\n      "name": "%s",\n      "url": "%s",\n      "notify_email": "%s"\n    }' \
+      "$MON_NAME" "$MON_URL" "$MON_EMAIL")
+
+    if [ -n "$MONITORS_JSON" ]; then
+      MONITORS_JSON="$MONITORS_JSON,\n$ENTRY"
+    else
+      MONITORS_JSON="$ENTRY"
+    fi
+
+    echo ""
+    echo -n "¿Agregar otra búsqueda? [s/N]: "
+    read -r MORE
+    echo ""
+    if [[ ! "$MORE" =~ ^[sS]$ ]]; then
+      break
+    fi
+    INDEX=$((INDEX + 1))
+  done
+
+  # ─── Intervalo ──────────────────────────────────────────────────────────────
+  echo "¿Cada cuántos minutos revisar? [60]: "
+  read -r INTERVAL_MINS
+  INTERVAL_MINS="$(echo "${INTERVAL_MINS:-60}" | tr -d '[:space:]')"
+  INTERVAL_MINS="${INTERVAL_MINS:-60}"
+
+  # ─── Confirmar ──────────────────────────────────────────────────────────────
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  SMTP:       $SMTP_USER @ $SMTP_HOST:$SMTP_PORT"
+  echo "  Búsquedas:  $INDEX"
+  echo "  Intervalo:  cada $INTERVAL_MINS minutos"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo -n "¿Confirmar? [s/N]: "
+  read -r CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[sS]$ ]]; then
+    echo "Instalación cancelada."
+    exit 0
+  fi
+
+  # ─── Escribir config.json ───────────────────────────────────────────────────
+  cat > "$INSTALL_DIR/config.json" <<CONFIG
 {
   "smtp": {
     "host": "$SMTP_HOST",
@@ -113,7 +129,26 @@ $(echo -e "$MONITORS_JSON")
   ]
 }
 CONFIG
-echo "✅  config.json generado"
+  echo "✅  config.json generado"
+
+else
+  # Leer intervalo del cron existente si hay uno, sino preguntar
+  EXISTING_CRON="$(crontab -l 2>/dev/null | grep 'zonaprop.*monitor.py' | head -1)"
+  if [ -n "$EXISTING_CRON" ]; then
+    INTERVAL_MINS="$(echo "$EXISTING_CRON" | grep -oP '^\*/\K[0-9]+')"
+    INTERVAL_MINS="${INTERVAL_MINS:-60}"
+    echo "  Intervalo detectado del cron: cada $INTERVAL_MINS minutos"
+  else
+    echo -n "¿Cada cuántos minutos revisar? [60]: "
+    read -r INTERVAL_MINS
+    INTERVAL_MINS="$(echo "${INTERVAL_MINS:-60}" | tr -d '[:space:]')"
+    INTERVAL_MINS="${INTERVAL_MINS:-60}"
+  fi
+
+fi
+
+echo ""
+echo "📦  Instalando..."
 
 # ─── Entorno virtual ──────────────────────────────────────────────────────────
 # Instalar python3-venv si no está disponible (Debian/Ubuntu)
