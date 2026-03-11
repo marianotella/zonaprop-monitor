@@ -160,6 +160,13 @@ def fetch_listings(url: str) -> list:
             pass  # intentar parsear lo que haya igual
 
         html = page.content()
+
+        # Guardar HTML para debug
+        debug_file = DATA_DIR / "debug_last_page.html"
+        with open(debug_file, "w", encoding="utf-8") as f:
+            f.write(html)
+        log.info(f"  HTML guardado en {debug_file} ({len(html)} chars)")
+
         browser.close()
 
     return _parse_html(html, url)
