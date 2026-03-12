@@ -16,20 +16,21 @@ echo "🏠  Zonaprop Server Monitor — Setup"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ─── Chequear config.json existente ───────────────────────────────────────────
+# ─── ¿Ya existe config.json? ──────────────────────────────────────────────────
 SKIP_CONFIG=false
 if [ -f "$INSTALL_DIR/config.json" ]; then
-  echo "✅  Se encontró un config.json existente."
-  echo -n "¿Usar la configuración actual? [S/n]: "
-  read -r USE_EXISTING
-  USE_EXISTING="${USE_EXISTING:-s}"
-  if [[ "$USE_EXISTING" =~ ^[sS]$ ]]; then
-    SKIP_CONFIG=true
-    echo "   Usando config.json existente."
-  else
-    echo "   Se va a sobreescribir la configuración."
-  fi
+  echo "Se encontró un config.json existente:"
   echo ""
+  cat "$INSTALL_DIR/config.json"
+  echo ""
+  echo -n "¿Usar esta configuración? [S/n]: "
+  read -r USE_EXISTING
+  USE_EXISTING="$(echo "${USE_EXISTING:-s}" | tr -d '[:space:]')"
+  if [[ "$USE_EXISTING" =~ ^[sS]$ ]] || [ -z "$USE_EXISTING" ]; then
+    SKIP_CONFIG=true
+    echo ""
+    echo "✅  Usando config.json existente"
+  fi
 fi
 
 if [ "$SKIP_CONFIG" = false ]; then
@@ -93,13 +94,13 @@ if [ "$SKIP_CONFIG" = false ]; then
     INDEX=$((INDEX + 1))
   done
 
-  # ─── Intervalo ────────────────────────────────────────────────────────────────
-  echo -n "¿Cada cuántos minutos revisar? [60]: "
+  # ─── Intervalo ──────────────────────────────────────────────────────────────
+  echo "¿Cada cuántos minutos revisar? [60]: "
   read -r INTERVAL_MINS
   INTERVAL_MINS="$(echo "${INTERVAL_MINS:-60}" | tr -d '[:space:]')"
   INTERVAL_MINS="${INTERVAL_MINS:-60}"
 
-  # ─── Confirmar ────────────────────────────────────────────────────────────────
+  # ─── Confirmar ──────────────────────────────────────────────────────────────
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  SMTP:       $SMTP_USER @ $SMTP_HOST:$SMTP_PORT"
@@ -114,14 +115,8 @@ if [ "$SKIP_CONFIG" = false ]; then
     exit 0
   fi
 
-fi  # fin SKIP_CONFIG
-
-echo ""
-echo "📦  Instalando..."
-
-# ─── Escribir config.json (solo si no se saltó) ───────────────────────────────
-if [ "$SKIP_CONFIG" = false ]; then
-cat > "$INSTALL_DIR/config.json" <<CONFIG
+  # ─── Escribir config.json ───────────────────────────────────────────────────
+  cat > "$INSTALL_DIR/config.json" <<CONFIG
 {
   "smtp": {
     "host": "$SMTP_HOST",
@@ -134,8 +129,26 @@ $(echo -e "$MONITORS_JSON")
   ]
 }
 CONFIG
-echo "✅  config.json generado"
-fi  # fin escritura config
+  echo "✅  config.json generado"
+
+else
+  # Leer intervalo del cron existente si hay uno, sino preguntar
+  EXISTING_CRON="$(crontab -l 2>/dev/null | grep 'zonaprop.*monitor.py' | head -1)"
+  if [ -n "$EXISTING_CRON" ]; then
+    INTERVAL_MINS="$(echo "$EXISTING_CRON" | grep -oP '^\*/\K[0-9]+')"
+    INTERVAL_MINS="${INTERVAL_MINS:-60}"
+    echo "  Intervalo detectado del cron: cada $INTERVAL_MINS minutos"
+  else
+    echo -n "¿Cada cuántos minutos revisar? [60]: "
+    read -r INTERVAL_MINS
+    INTERVAL_MINS="$(echo "${INTERVAL_MINS:-60}" | tr -d '[:space:]')"
+    INTERVAL_MINS="${INTERVAL_MINS:-60}"
+  fi
+
+fi
+
+echo ""
+echo "📦  Instalando..."
 
 # ─── Entorno virtual ──────────────────────────────────────────────────────────
 # Instalar python3-venv si no está disponible (Debian/Ubuntu)
@@ -164,20 +177,9 @@ fi
 
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip --quiet
 "$INSTALL_DIR/venv/bin/pip" install curl_cffi beautifulsoup4 --quiet
-echo "✅  Dependencias instaladas"
+echo "✅  Dependencias Python instaladas"
 
 # ─── Cron job ─────────────────────────────────────────────────────────────────
-# Si se saltó la config, leer intervalo del cron existente o usar 60 por defecto
-if [ "$SKIP_CONFIG" = true ]; then
-  EXISTING_CRON=$(crontab -l 2>/dev/null | grep "zonaprop.*monitor.py" || true)
-  if [ -n "$EXISTING_CRON" ]; then
-    INTERVAL_MINS=$(echo "$EXISTING_CRON" | grep -oP '^\*/\K[0-9]+' || echo "60")
-    echo "   Manteniendo intervalo existente: cada $INTERVAL_MINS minutos"
-  else
-    INTERVAL_MINS=60
-  fi
-fi
-
 CRON_CMD="*/$INTERVAL_MINS * * * * $INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/monitor.py >> $INSTALL_DIR/cron.log 2>&1"
 
 # Evitar duplicados
