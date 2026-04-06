@@ -164,9 +164,15 @@ def _parse_html(html, url):
 
     # ── Método 2: HTML clásico ────────────────────────────────────────────────
     soup = BeautifulSoup(html, "html.parser")
-    cards = (soup.find_all(attrs={"data-id": True}) or
-             soup.find_all(attrs={"data-posting-id": True}) or
-             soup.find_all("div", class_=re.compile(r"posting|property|listing", re.I)))
+    all_cards = (soup.find_all(attrs={"data-id": True}) or
+                 soup.find_all(attrs={"data-posting-id": True}) or
+                 soup.find_all("div", class_=re.compile(r"posting|property|listing", re.I)))
+
+    # Excluir recomendaciones (están dentro de thin-postings-container)
+    cards = [
+        c for c in all_cards
+        if not c.find_parent(class_=re.compile(r"thin.postings.container", re.I))
+    ]
 
     listings = []
     for card in cards:
