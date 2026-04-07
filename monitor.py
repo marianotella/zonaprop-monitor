@@ -164,9 +164,15 @@ def _parse_html(html, url):
 
     # ── Método 2: HTML clásico ────────────────────────────────────────────────
     soup = BeautifulSoup(html, "html.parser")
-    cards = (soup.find_all(attrs={"data-id": True}) or
-             soup.find_all(attrs={"data-posting-id": True}) or
-             soup.find_all("div", class_=re.compile(r"posting|property|listing", re.I)))
+    all_cards = (soup.find_all(attrs={"data-id": True}) or
+                 soup.find_all(attrs={"data-posting-id": True}) or
+                 soup.find_all("div", class_=re.compile(r"posting|property|listing", re.I)))
+
+    # Excluir recomendaciones (están dentro de thin-postings-container)
+    cards = [
+        c for c in all_cards
+        if not c.find_parent(class_=re.compile(r"thin.postings.container", re.I))
+    ]
 
     listings = []
     for card in cards:
@@ -248,6 +254,12 @@ def fetch_listings(url, retries=3):
     raise last_err or Exception("fetch_listings: sin respuesta")
 
 
+_RECOMMENDATION_KEYS = {
+    "suggestedListPostings", "suggestedPostings", "relatedPostings",
+    "relatedListings", "recommendations", "suggested", "related",
+    "highlightedListPostings", "thinPostings",
+}
+
 def _find_postings(data, depth=0):
     if depth > 10:
         return []
@@ -257,7 +269,9 @@ def _find_postings(data, depth=0):
                 p = _parse_list(data[key])
                 if p:
                     return p
-        for v in data.values():
+        for k, v in data.items():
+            if k in _RECOMMENDATION_KEYS:
+                continue  # Ignorar secciones de recomendaciones
             r = _find_postings(v, depth + 1)
             if r:
                 return r
@@ -280,6 +294,12 @@ def _parse_list(items):
         return []
     results = []
     for item in items:
+        # Saltar items marcados explícitamente como recomendaciones/sugerencias
+        if item.get("isRecommended") or item.get("isSuggested") or item.get("isRelated"):
+            continue
+        posting_type = str(item.get("postingType") or item.get("type") or "").lower()
+        if "suggest" in posting_type or "recommend" in posting_type or "related" in posting_type:
+            continue
         pid = (item.get("id") or item.get("postingId") or
                item.get("posting_id") or item.get("propertyId") or "")
 
